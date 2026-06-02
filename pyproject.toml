@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hp-printer-mcp"
+dynamic = ["version"]
+description = "MCP server for HP Smart Tank 750 — print, scan, copy, and supply levels."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "hp-printer-mcp" }]
+dependencies = [
+  "mcp~=1.8.0",
+  "httpx>=0.27.0",
+  "zeroconf>=0.131.0",
+  "pysnmp-lextudio>=6.0.0",
+  "pywin32>=306; sys_platform == 'win32'",
+  "pypdf>=4.0.0",
+  "pymupdf>=1.24.0",
+  "Pillow>=10.0.0",
+  "uvicorn>=0.30.0",
+  "starlette>=0.37.0",
+]
+
+[project.scripts]
+hp-printer-mcp = "hp_printer_mcp.__main__:main"
+
+[tool.hatch.version]
+path = "src/hp_printer_mcp/__about__.py"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/hp_printer_mcp"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
