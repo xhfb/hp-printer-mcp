@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from hp_printer_mcp.config import Settings
-from hp_printer_mcp.print_win32 import print_file
+from hp_printer_mcp.print_ipp import print_file
 from hp_printer_mcp.scan_escl import scan_to_file
 
 
@@ -29,6 +29,7 @@ def copy_document(
         color_mode="RGB24" if color == "color" else "Grayscale8",
         paper=paper,
         orientation=orientation,
+        include_base64=False,
     )
     if not scan_result.get("success"):
         return scan_result

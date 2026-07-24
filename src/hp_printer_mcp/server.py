@@ -6,11 +6,12 @@ from hp_printer_mcp.config import load_settings
 from hp_printer_mcp.copy import copy_document as run_copy_document
 from hp_printer_mcp.discovery import discover_printer as run_discover_printer
 from hp_printer_mcp.discovery import get_device_status as run_get_device_status
-from hp_printer_mcp.print_win32 import cancel_print_job as run_cancel_print_job
-from hp_printer_mcp.print_win32 import is_printer_ready
-from hp_printer_mcp.print_win32 import list_print_jobs as run_list_print_jobs
-from hp_printer_mcp.print_win32 import print_file as run_print_file
-from hp_printer_mcp.print_win32 import print_queue_count
+from hp_printer_mcp.print_ipp import cancel_print_job as run_cancel_print_job
+from hp_printer_mcp.print_ipp import get_ipp_printer_state
+from hp_printer_mcp.print_ipp import is_printer_ready
+from hp_printer_mcp.print_ipp import list_print_jobs as run_list_print_jobs
+from hp_printer_mcp.print_ipp import print_file as run_print_file
+from hp_printer_mcp.print_ipp import print_queue_count
 from hp_printer_mcp.scan_escl import get_scan_capabilities as run_get_scan_capabilities
 from hp_printer_mcp.scan_escl import get_scanner_status as run_get_scanner_status
 from hp_printer_mcp.scan_escl import scan_to_file as run_scan_to_file
@@ -28,19 +29,23 @@ async def discover_printer(timeout_sec: float = 5.0) -> dict:
 
 @mcp.tool()
 async def get_device_status() -> dict:
-    """Get aggregated printer/scanner status for the configured HP Smart Tank 750."""
+    """Get aggregated printer/scanner status (IPP printer-state + eSCL scanner)."""
     settings = load_settings()
     return run_get_device_status(
         settings,
         scanner_status_fn=run_get_scanner_status,
         print_queue_count_fn=print_queue_count,
         printer_ready_fn=lambda s: is_printer_ready(s),
+        ipp_state_fn=get_ipp_printer_state,
     )
 
 
 @mcp.tool()
 async def print_file(
-    file_path: str,
+    file_path: Optional[str] = None,
+    content_base64: Optional[str] = None,
+    filename: Optional[str] = None,
+    url: Optional[str] = None,
     copies: int = 1,
     orientation: str = "portrait",
     paper: str = "A4",
@@ -51,20 +56,30 @@ async def print_file(
     page_range: str = "all",
     printer_name: Optional[str] = None,
 ) -> dict:
-    """Print a local document via the Windows print queue with full driver settings.
+    """Print a document via IPP (network-native). Provide exactly one source.
+
+    Sources:
+      - file_path: local path on the MCP host
+      - content_base64 + filename: remote clients (e.g. Raspberry Pi) upload bytes
+      - url: http/https URL (RFC1918-only by default)
+
+    Documents are rasterized to JPEG when the printer does not accept PDF.
 
     orientation: portrait | landscape
     paper: A4, A3, A5, Letter, Legal, B5, ...
     paper_type: plain | photo | cardstock | envelope | labels | transparency
     quality: draft | normal | high | best
     color: color | monochrome
-    duplex: none | long_edge (沿长边) | short_edge (沿短边)
+    duplex: none | long_edge | short_edge
     page_range: all | e.g. 1-3,5 (PDF only)
     """
     settings = load_settings()
     return run_print_file(
         settings,
         file_path=file_path,
+        content_base64=content_base64,
+        filename=filename,
+        url=url,
         copies=copies,
         orientation=orientation,
         paper=paper,
@@ -79,14 +94,14 @@ async def print_file(
 
 @mcp.tool()
 async def list_print_jobs(printer_name: Optional[str] = None) -> dict:
-    """List current print jobs on the configured Windows printer queue."""
+    """List current print jobs on the printer via IPP Get-Jobs."""
     settings = load_settings()
     return run_list_print_jobs(settings, printer_name=printer_name)
 
 
 @mcp.tool()
 async def cancel_print_job(job_id: int, printer_name: Optional[str] = None) -> dict:
-    """Cancel a print job by job ID on the Windows print queue."""
+    """Cancel a print job by IPP job ID."""
     settings = load_settings()
     return run_cancel_print_job(settings, job_id=job_id, printer_name=printer_name)
 
@@ -114,11 +129,13 @@ async def scan_to_file(
     paper: str = "A4",
     orientation: str = "portrait",
     output_path: Optional[str] = None,
+    include_base64: Optional[bool] = None,
 ) -> dict:
     """Scan from platen or ADF and save to a local file (pdf/jpeg/png).
 
     paper: A4, A5, B5, Letter, ... or MAX for full scan area.
     orientation: portrait | landscape
+    include_base64: if true, also return content_base64 for remote clients
     """
     settings = load_settings()
     return run_scan_to_file(
@@ -130,6 +147,7 @@ async def scan_to_file(
         paper=paper,
         orientation=orientation,
         output_path=output_path,
+        include_base64=include_base64,
     )
 
 
@@ -153,7 +171,7 @@ async def copy_document(
     dpi: int = 300,
     format: str = "pdf",
 ) -> dict:
-    """Copy by scanning then printing (software workflow)."""
+    """Copy by scanning then printing via eSCL + IPP (software workflow)."""
     settings = load_settings()
     return run_copy_document(
         settings,

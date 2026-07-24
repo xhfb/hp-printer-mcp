@@ -53,14 +53,20 @@ class _DiscoveryListener:
         return
 
 
-def _probe_host(host: str, *, use_https: bool, timeout_sec: float = 3.0) -> dict[str, Any]:
+def _probe_host(
+    host: str,
+    *,
+    use_https: bool,
+    timeout_sec: float = 3.0,
+    trust_env: bool = False,
+) -> dict[str, Any]:
     import httpx
 
     scheme = "https" if use_https else "http"
     base = host if host.startswith("http") else f"{scheme}://{host}"
     result: dict[str, Any] = {"host": host, "reachable": False, "endpoints": {}}
 
-    with httpx.Client(timeout=timeout_sec, verify=False) as client:
+    with httpx.Client(timeout=timeout_sec, verify=False, trust_env=trust_env) as client:
         for path in ("/eSCL/ScannerStatus", "/DevMgmt/ProductConfigDyn.xml"):
             url = f"{base.rstrip('/')}{path}"
             try:
@@ -101,6 +107,7 @@ def discover_printer(settings: Settings, *, timeout_sec: float = 5.0) -> dict[st
         configured_probe = _probe_host(
             settings.printer_host,
             use_https=settings.use_https,
+            trust_env=settings.http_trust_env,
         )
 
     return ok(
@@ -118,22 +125,31 @@ def get_device_status(
     scanner_status_fn,
     print_queue_count_fn,
     printer_ready_fn,
+    ipp_state_fn=None,
 ) -> dict[str, Any]:
     if not settings.printer_host:
         return fail("HP_PRINTER_HOST is not configured")
 
-    probe = _probe_host(settings.printer_host, use_https=settings.use_https)
+    probe = _probe_host(
+        settings.printer_host,
+        use_https=settings.use_https,
+        trust_env=settings.http_trust_env,
+    )
     scanner = scanner_status_fn(settings)
     queue_count = print_queue_count_fn(settings)
     printer_ready = printer_ready_fn(settings)
+    ipp_state = ipp_state_fn(settings) if ipp_state_fn else None
 
     data = {
         "host": settings.printer_host,
+        "ipp_uri": settings.ipp_uri,
         "host_reachable": probe.get("reachable", False),
         "probe_endpoints": probe.get("endpoints", {}),
         "scanner": scanner.get("data") if scanner.get("success") else None,
         "scanner_error": scanner.get("error"),
         "printer_ready": printer_ready,
         "print_queue_job_count": queue_count,
+        "ipp": ipp_state.get("data") if ipp_state and ipp_state.get("success") else None,
+        "ipp_error": ipp_state.get("error") if ipp_state else None,
     }
     return ok(data)

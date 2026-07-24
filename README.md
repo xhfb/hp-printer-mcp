@@ -2,76 +2,79 @@
 
 MCP server for **HP Smart Tank 750** (network-connected). Exposes print, scan, copy, status, and supply-level tools for Cursor agents.
 
+## Protocols (network-native)
+
+| Feature | Protocol |
+|---------|----------|
+| Print | **IPP** (`ipp://{host}:631/ipp/print`) — documents rasterized to JPEG when PDF is unsupported |
+| Scan | **eSCL** (`http://{host}/eSCL/`) |
+| Supplies | HP EWS → SNMP → IPP (best effort) |
+
+Windows spooler is **no longer required**. The same MCP can run on Windows or Linux (e.g. Raspberry Pi) as long as it can reach the printer on the LAN.
+
 ## Prerequisites
 
-1. **Windows 10/11** host (printing uses the Windows spooler via `pywin32`).
-2. Add the printer in **Settings → Bluetooth & devices → Printers & scanners** using its network IP (IPP or HP driver).
-3. Python **3.10+**.
-4. Printer and PC on the same LAN; note the printer IP (shown on the printer panel or router).
+1. Printer on the LAN with a stable IP (panel / router DHCP reservation).
+2. Python **3.10+**.
+3. Optional: place the host behind [MCP Router](https://github.com/mcp-router/mcp-router) so other LAN machines (Cursor) can call tools with a token.
 
 ## Install
 
 ```powershell
-cd G:\TOOL_PROJECT\hp_printer
+cd G:\TOOL_PROJECT\hp_printer   # or /home/pi/hp_printer
 pip install -e .
-pip install pytest   # optional, for tests
+pip install pytest              # optional
 ```
 
-Copy [`.env.example`](.env.example) and set at least:
+Copy [`.env.example`](.env.example):
 
 ```env
-HP_PRINTER_HOST=192.168.x.x
+HP_PRINTER_HOST=192.168.31.11
 HP_PRINTER_NAME=HP Smart Tank 750
-HP_SCAN_OUTPUT_DIR=G:\TOOL_PROJECT\hp_printer\output
+HP_IPP_URI=ipp://192.168.31.11:631/ipp/print
+HP_SCAN_OUTPUT_DIR=./output
+HP_HTTP_TRUST_ENV=false
 ```
 
 ## Run
 
-**STDIO (Cursor default):**
+**STDIO (Cursor / MCP Router default):**
 
-```powershell
+```bash
 hp-printer-mcp
 ```
 
-**HTTP (local only):**
+**HTTP (local only by default):**
 
-```powershell
+```bash
 hp-printer-mcp --http --host 127.0.0.1 --port 3002
 ```
 
-## Cursor MCP configuration
+## Cursor / MCP Router
 
-Add to Cursor MCP settings (`mcp.json`):
+Workstation still registers this server in MCP Router. LAN clients (e.g. Raspberry Pi) keep pointing at the router:
 
 ```json
 {
   "mcpServers": {
-    "hp-printer": {
-      "command": "hp-printer-mcp",
-      "args": [],
-      "env": {
-        "HP_PRINTER_HOST": "192.168.x.x",
-        "HP_PRINTER_NAME": "HP Smart Tank 750",
-        "HP_SCAN_OUTPUT_DIR": "G:\\TOOL_PROJECT\\hp_printer\\output"
+    "mcp-router": {
+      "url": "http://192.168.31.26:3282/mcp",
+      "headers": {
+        "Authorization": "Bearer mcpr_..."
       }
     }
   }
 }
 ```
 
-Or with `uv`:
+### Remote print (no host-local file)
 
 ```json
 {
-  "mcpServers": {
-    "hp-printer": {
-      "command": "uv",
-      "args": ["run", "--directory", "G:\\TOOL_PROJECT\\hp_printer", "hp-printer-mcp"],
-      "env": {
-        "HP_PRINTER_HOST": "192.168.x.x"
-      }
-    }
-  }
+  "content_base64": "<base64 of file bytes>",
+  "filename": "test.txt",
+  "paper": "A4",
+  "color": "monochrome"
 }
 ```
 
@@ -80,15 +83,15 @@ Or with `uv`:
 | Tool | Description |
 |------|-------------|
 | `discover_printer` | mDNS discovery + probe configured host |
-| `get_device_status` | Host reachability, scanner state, print queue |
-| `print_file` | Print PDF/image/text/Office with paper, color, duplex, quality, page range |
-| `list_print_jobs` | List spooler jobs |
-| `cancel_print_job` | Cancel a job by ID |
+| `get_device_status` | Host reachability, eSCL scanner, IPP printer-state |
+| `print_file` | Print via IPP — `file_path` **or** `content_base64`+`filename` **or** `url` |
+| `list_print_jobs` | List IPP jobs |
+| `cancel_print_job` | Cancel by IPP `job_id` |
 | `get_scan_capabilities` | eSCL resolutions, formats, sources |
 | `get_scanner_status` | Idle/busy, ADF loaded |
-| `scan_to_file` | Scan platen/ADF to PDF/JPEG/PNG (`paper`: A4, B5, … or `MAX`) |
-| `get_supply_levels` | Ink levels (HP EWS → SNMP → IPP) |
-| `copy_document` | Scan then print (software copy) |
+| `scan_to_file` | Scan to PDF/JPEG/PNG; optional `content_base64` in response |
+| `get_supply_levels` | Ink levels (best effort) |
+| `copy_document` | Scan then IPP-print |
 
 All tools return JSON: `{ "success": bool, "error": string|null, "data": ... }`.
 
@@ -96,43 +99,37 @@ All tools return JSON: `{ "success": bool, "error": string|null, "data": ... }`.
 
 | Parameter | Values | Notes |
 |-----------|--------|-------|
-| `orientation` | `portrait`, `landscape` | 方向 |
-| `paper` | `A4`, `A3`, `A5`, `Letter`, `Legal`, … | 纸张大小 |
-| `paper_type` | `plain`, `photo`, `cardstock`, … | 纸张类型（驱动相关） |
-| `quality` | `draft`, `normal`, `high`, `best` | 输出质量 |
-| `color` | `color`, `monochrome` | 彩色 / 黑白 |
-| `duplex` | `none`, `long_edge`, `short_edge` | 单面 / 长边双面 / 短边双面 |
-| `copies` | integer ≥ 1 | 份数 |
-| `page_range` | `all` or `1-3,5` | PDF 页码范围 |
-
-PDF/图片/文本通过 Windows DEVMODE + GDI 渲染打印；Office 格式为尽力应用驱动设置。
-
-## Protocols
-
-- **Print:** Windows print spooler (`win32print` / ShellExecute).
-- **Scan:** [eSCL](https://mopria.org/eSCL) at `http://{IP}/eSCL/`.
-- **Supplies:** HP `/DevMgmt/ConsumableConfigDyn.xml`, then SNMP Printer-MIB, then IPP.
+| `file_path` / `content_base64`+`filename` / `url` | one required | remote clients should use base64 |
+| `orientation` | `portrait`, `landscape` | |
+| `paper` | `A4`, `A3`, `A5`, `Letter`, … | mapped to IPP `media` |
+| `paper_type` | `plain`, `photo`, … | may be ignored over IPP (warning returned) |
+| `quality` | `draft`, `normal`, `high`, `best` | IPP print-quality |
+| `color` | `color`, `monochrome` | |
+| `duplex` | `none`, `long_edge`, `short_edge` | |
+| `copies` | integer ≥ 1 | |
+| `page_range` | `all` or `1-3,5` | PDF only |
 
 ## Security
 
-- Default transport is **stdio** (local agent only).
+- Default transport is **stdio** (local agent / MCP Router child process).
 - HTTP mode binds to `127.0.0.1` by default.
-- File paths for print/scan are restricted to `HP_SCAN_OUTPUT_DIR`, `%USERPROFILE%\Documents`, and optional `HP_ALLOWED_PATHS`.
+- Uploads capped by `HP_MAX_UPLOAD_MB` (default 25).
+- URL fetch: http/https only, no redirects, RFC1918-only by default (`HP_URL_ALLOW_RFC1918_ONLY`).
+- `HP_HTTP_TRUST_ENV=false` avoids system HTTP proxies breaking LAN printer access (common cause of 502).
 
 ## Troubleshooting
 
 | Issue | Action |
 |-------|--------|
-| `HP_PRINTER_HOST is not configured` | Set env var in MCP config |
-| Print fails | Confirm printer name matches Windows; try printing manually once |
-| Scan timeout | Check IP; try `HP_USE_HTTPS=true` if firmware requires TLS |
-| ADF not loaded | Place pages in ADF; call `get_scanner_status` |
-| Ink levels unknown | Smart Tank levels are estimates; check tank windows visually |
-| Office formats | Install associated app (Word, etc.) or convert to PDF first |
+| `HP_PRINTER_HOST is not configured` | Set env / `.env` |
+| IPP 401 | Check `HP_IPP_USERNAME` / `HP_IPP_PASSWORD` (guest often works) |
+| Scan 502 on Windows only | Ensure `HP_HTTP_TRUST_ENV=false`; clear HTTP_PROXY for that host |
+| Office `.docx` print fails | Convert to PDF/TXT first (IPP path rasterizes PDF/images/text) |
+| Blank / wrong size | Check `paper` + `orientation`; Smart Tank receives JPEG pages |
 
 ## Tests
 
-```powershell
+```bash
 pytest tests/
 ```
 
