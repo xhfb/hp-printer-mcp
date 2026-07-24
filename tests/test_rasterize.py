@@ -16,8 +16,6 @@ def test_rasterize_txt(tmp_path: Path):
 
 
 def test_cjk_font_loads_and_renders():
-    font = _load_text_font(36)
-    # FreeType fonts expose getmask; default bitmap font is last-resort only.
     pages = _render_text_pages(
         "中文打印测试 ABC",
         paper="A4",
@@ -25,6 +23,17 @@ def test_cjk_font_loads_and_renders():
         monochrome=True,
     )
     assert len(pages) == 1
-    # Non-white pixels should exist (text was drawn)
     extrema = pages[0].convert("L").getextrema()
     assert extrema[0] < 250
+
+
+def test_latin_not_tofu():
+    from hp_printer_mcp.rasterize import _load_text_fonts, _font_renders_distinct_latin
+
+    _cjk, latin = _load_text_fonts(36)
+    assert _font_renders_distinct_latin(latin)
+
+    # A and W must not share identical ink (would indicate .notdef boxes)
+    pages_a = _render_text_pages("AAAA", paper="A4", orientation="portrait", monochrome=True)
+    pages_w = _render_text_pages("WWWW", paper="A4", orientation="portrait", monochrome=True)
+    assert list(pages_a[0].getdata()) != list(pages_w[0].getdata())

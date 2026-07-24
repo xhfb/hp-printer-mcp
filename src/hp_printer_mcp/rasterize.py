@@ -25,64 +25,153 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 PDF_EXTENSIONS = {".pdf"}
 TEXT_EXTENSIONS = {".txt", ".log", ".md", ".csv"}
 
-# Prefer CJK-capable fonts so Chinese does not render as tofu (□).
-_FONT_CANDIDATES = [
-    # Windows
+# CJK-capable fonts (may lack Latin — e.g. some DroidSansFallback builds).
+_CJK_FONT_CANDIDATES = [
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\msyhbd.ttc",
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\simsun.ttc",
     r"C:\Windows\Fonts\msjh.ttc",
     r"C:\Windows\Fonts\arialuni.ttf",
-    # Linux / Pi
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/truetype/arphic/uming.ttc",
-    "DejaVuSans.ttf",
+]
+
+# Latin / ASCII fonts (avoid tofu for English digits/letters).
+_LATIN_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fonts\calibri.ttf",
+    r"C:\Windows\Fonts\segoeui.ttf",
+    r"C:\Windows\Fonts\msyh.ttc",  # YaHei usually has Latin too
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
 ]
 
 
-def _load_text_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _try_font(path: str, size: int) -> ImageFont.FreeTypeFont | None:
+    try:
+        return ImageFont.truetype(path, size=size, index=0)
+    except OSError:
+        return None
+
+
+def _font_renders_distinct_latin(font: ImageFont.ImageFont) -> bool:
+    """Reject fonts that map A/W to the same .notdef tofu box."""
+    try:
+        img_a = Image.new("L", (64, 64), 255)
+        img_w = Image.new("L", (64, 64), 255)
+        ImageDraw.Draw(img_a).text((4, 4), "A", font=font, fill=0)
+        ImageDraw.Draw(img_w).text((4, 4), "W", font=font, fill=0)
+        return list(img_a.getdata()) != list(img_w.getdata())
+    except Exception:
+        return False
+
+
+def _load_font_from_list(
+    size: int, candidates: list[str], *, require_latin: bool = False
+) -> ImageFont.ImageFont:
     env_font = os.getenv("HP_PRINT_FONT", "").strip()
-    candidates = ([env_font] if env_font else []) + _FONT_CANDIDATES
-    for path in candidates:
+    ordered = ([env_font] if env_font else []) + candidates
+    for path in ordered:
         if not path:
             continue
-        try:
-            # index=0 for TTC collections
-            return ImageFont.truetype(path, size=size, index=0)
-        except OSError:
+        font = _try_font(path, size)
+        if font is None:
             continue
+        if require_latin and not _font_renders_distinct_latin(font):
+            continue
+        return font
     return ImageFont.load_default()
 
 
-def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
-    if not text:
-        return 0
-    bbox = draw.textbbox((0, 0), text, font=font)
-    return max(0, bbox[2] - bbox[0])
+def _load_text_fonts(size: int) -> tuple[ImageFont.ImageFont, ImageFont.ImageFont]:
+    """Return (cjk_font, latin_font)."""
+    cjk = _load_font_from_list(size, _CJK_FONT_CANDIDATES, require_latin=False)
+    latin = _load_font_from_list(size, _LATIN_FONT_CANDIDATES, require_latin=True)
+    # If CJK font itself has good Latin, prefer it for both (better metrics).
+    if _font_renders_distinct_latin(cjk):
+        return cjk, cjk
+    return cjk, latin
 
 
-def _wrap_line(
+def _load_text_font(size: int) -> ImageFont.ImageFont:
+    """Backward-compatible single font (prefers CJK with Latin when possible)."""
+    cjk, latin = _load_text_fonts(size)
+    if _font_renders_distinct_latin(cjk):
+        return cjk
+    return latin
+
+
+def _char_needs_cjk(ch: str) -> bool:
+    code = ord(ch)
+    return (
+        0x2E80 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFE30 <= code <= 0xFE4F
+        or 0xFF00 <= code <= 0xFFEF
+        or 0x20000 <= code <= 0x2FA1F
+    )
+
+
+def _font_for_char(
+    ch: str, cjk: ImageFont.ImageFont, latin: ImageFont.ImageFont
+) -> ImageFont.ImageFont:
+    return cjk if _char_needs_cjk(ch) else latin
+
+
+def _text_width_mixed(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    cjk: ImageFont.ImageFont,
+    latin: ImageFont.ImageFont,
+) -> int:
+    width = 0
+    for ch in text:
+        font = _font_for_char(ch, cjk, latin)
+        bbox = draw.textbbox((0, 0), ch, font=font)
+        width += max(0, bbox[2] - bbox[0])
+    return width
+
+
+def _draw_text_mixed(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    *,
+    cjk: ImageFont.ImageFont,
+    latin: ImageFont.ImageFont,
+    fill: tuple[int, int, int],
+) -> None:
+    x, y = xy
+    for ch in text:
+        font = _font_for_char(ch, cjk, latin)
+        draw.text((x, y), ch, fill=fill, font=font)
+        bbox = draw.textbbox((0, 0), ch, font=font)
+        x += max(0, bbox[2] - bbox[0])
+
+
+def _wrap_line_mixed(
     draw: ImageDraw.ImageDraw,
     line: str,
-    font: ImageFont.ImageFont,
+    cjk: ImageFont.ImageFont,
+    latin: ImageFont.ImageFont,
     max_width: int,
 ) -> list[str]:
     if not line:
         return [""]
-    # Fast path when whole line fits
-    if _text_width(draw, line, font) <= max_width:
+    if _text_width_mixed(draw, line, cjk, latin) <= max_width:
         return [line]
 
     chunks: list[str] = []
     current = ""
     for ch in line:
         trial = current + ch
-        if current and _text_width(draw, trial, font) > max_width:
+        if current and _text_width_mixed(draw, trial, cjk, latin) > max_width:
             chunks.append(current)
             current = ch
         else:
@@ -136,10 +225,10 @@ def _render_text_pages(
     margin = 72  # ~0.48" at 150 DPI
     # ~12pt body text at 150 DPI; readable on A4 hardcopy
     font_size = int(os.getenv("HP_PRINT_FONT_SIZE", "36"))
-    font = _load_text_font(font_size)
+    cjk_font, latin_font = _load_text_fonts(font_size)
     # Measure real glyph metrics for spacing
     probe = ImageDraw.Draw(Image.new("RGB", (10, 10), "white"))
-    sample_bbox = probe.textbbox((0, 0), "汉字Ag", font=font)
+    sample_bbox = probe.textbbox((0, 0), "汉字Ag", font=cjk_font)
     glyph_h = max(font_size, sample_bbox[3] - sample_bbox[1])
     line_height = int(glyph_h * 1.45)
     max_width = width - 2 * margin
@@ -147,7 +236,7 @@ def _render_text_pages(
     raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     wrapped: list[str] = []
     for line in raw_lines:
-        wrapped.extend(_wrap_line(probe, line, font, max_width))
+        wrapped.extend(_wrap_line_mixed(probe, line, cjk_font, latin_font, max_width))
 
     lines_per_page = max(1, (height - 2 * margin) // line_height)
     pages: list[Image.Image] = []
@@ -158,7 +247,9 @@ def _render_text_pages(
         y = margin
         fill = (0, 0, 0)
         for line in chunk:
-            draw.text((margin, y), line, fill=fill, font=font)
+            _draw_text_mixed(
+                draw, (margin, y), line, cjk=cjk_font, latin=latin_font, fill=fill
+            )
             y += line_height
         pages.append(_to_rgb(img, monochrome=monochrome))
     return pages
