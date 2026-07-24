@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -23,6 +24,72 @@ PAPER_PX: dict[str, tuple[int, int]] = {
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 PDF_EXTENSIONS = {".pdf"}
 TEXT_EXTENSIONS = {".txt", ".log", ".md", ".csv"}
+
+# Prefer CJK-capable fonts so Chinese does not render as tofu (□).
+_FONT_CANDIDATES = [
+    # Windows
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\simsun.ttc",
+    r"C:\Windows\Fonts\msjh.ttc",
+    r"C:\Windows\Fonts\arialuni.ttf",
+    # Linux / Pi
+    "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+    "DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+
+def _load_text_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    env_font = os.getenv("HP_PRINT_FONT", "").strip()
+    candidates = ([env_font] if env_font else []) + _FONT_CANDIDATES
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            # index=0 for TTC collections
+            return ImageFont.truetype(path, size=size, index=0)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+    if not text:
+        return 0
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return max(0, bbox[2] - bbox[0])
+
+
+def _wrap_line(
+    draw: ImageDraw.ImageDraw,
+    line: str,
+    font: ImageFont.ImageFont,
+    max_width: int,
+) -> list[str]:
+    if not line:
+        return [""]
+    # Fast path when whole line fits
+    if _text_width(draw, line, font) <= max_width:
+        return [line]
+
+    chunks: list[str] = []
+    current = ""
+    for ch in line:
+        trial = current + ch
+        if current and _text_width(draw, trial, font) > max_width:
+            chunks.append(current)
+            current = ch
+        else:
+            current = trial
+    if current:
+        chunks.append(current)
+    return chunks or [""]
 
 
 def _page_size(paper: str, orientation: str) -> tuple[int, int]:
@@ -66,27 +133,21 @@ def _render_text_pages(
     monochrome: bool,
 ) -> list[Image.Image]:
     width, height = _page_size(paper, orientation)
-    margin = 60
-    line_height = 28
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 18)
-    except OSError:
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
-        except OSError:
-            font = ImageFont.load_default()
+    margin = 72  # ~0.48" at 150 DPI
+    # ~12pt body text at 150 DPI; readable on A4 hardcopy
+    font_size = int(os.getenv("HP_PRINT_FONT_SIZE", "36"))
+    font = _load_text_font(font_size)
+    # Measure real glyph metrics for spacing
+    probe = ImageDraw.Draw(Image.new("RGB", (10, 10), "white"))
+    sample_bbox = probe.textbbox((0, 0), "汉字Ag", font=font)
+    glyph_h = max(font_size, sample_bbox[3] - sample_bbox[1])
+    line_height = int(glyph_h * 1.45)
+    max_width = width - 2 * margin
 
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    max_chars = max(20, (width - 2 * margin) // 10)
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     wrapped: list[str] = []
-    for line in lines:
-        if not line:
-            wrapped.append("")
-            continue
-        while len(line) > max_chars:
-            wrapped.append(line[:max_chars])
-            line = line[max_chars:]
-        wrapped.append(line)
+    for line in raw_lines:
+        wrapped.extend(_wrap_line(probe, line, font, max_width))
 
     lines_per_page = max(1, (height - 2 * margin) // line_height)
     pages: list[Image.Image] = []
