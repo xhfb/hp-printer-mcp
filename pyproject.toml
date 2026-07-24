@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hp-printer-mcp"
 dynamic = ["version"]
-description = "MCP server for HP Smart Tank 750 — print, scan, copy, and supply levels."
+description = "MCP server for HP Smart Tank 750 — network-native IPP print, eSCL scan, copy, and supply levels."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
