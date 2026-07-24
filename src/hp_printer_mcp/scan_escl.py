@@ -7,10 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import base64
+
 import httpx
 import xml.etree.ElementTree as ET
 
 from hp_printer_mcp.config import Settings, fail, ok
+from hp_printer_mcp.http_util import make_client
 
 ESCL_NS = {
     "scan": "http://schemas.hp.com/imaging/escl/2011/05/03",
@@ -40,9 +43,7 @@ def _find_all_text(root: ET.Element, name: str) -> list[str]:
 
 
 def _client(settings: Settings) -> httpx.Client:
-    read_timeout = max(settings.escl_timeout_sec, settings.scan_poll_max_sec)
-    timeout = httpx.Timeout(connect=30.0, read=read_timeout, write=30.0, pool=30.0)
-    return httpx.Client(timeout=timeout, verify=False)
+    return make_client(settings)
 
 
 def _mime_for_format(fmt: str) -> str:
@@ -438,6 +439,7 @@ def scan_to_file(
     paper: str = "A4",
     orientation: str = "portrait",
     output_path: str | None = None,
+    include_base64: bool | None = None,
 ) -> dict[str, Any]:
     if not settings.printer_host:
         return fail("HP_PRINTER_HOST is not configured")
@@ -524,4 +526,18 @@ def scan_to_file(
             "width": scan_region[0],
             "height": scan_region[1],
         }
+    want_b64 = (
+        settings.include_scan_base64 if include_base64 is None else include_base64
+    )
+    if want_b64:
+        # Cap base64 payload for very large scans
+        max_b64_bytes = settings.max_upload_mb * 1024 * 1024
+        if len(content) <= max_b64_bytes:
+            result["content_base64"] = base64.b64encode(content).decode("ascii")
+            result["content_bytes"] = len(content)
+        else:
+            result["content_base64"] = None
+            result["content_base64_omitted"] = (
+                f"scan larger than HP_MAX_UPLOAD_MB ({settings.max_upload_mb})"
+            )
     return ok(result)

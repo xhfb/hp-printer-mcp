@@ -114,7 +114,11 @@ def _parse_hp_ews_xml(text: str) -> list[dict[str, Any]]:
 
 def _fetch_hp_ews(settings: Settings) -> list[dict[str, Any]]:
     url = f"{settings.base_url}/DevMgmt/ConsumableConfigDyn.xml"
-    with httpx.Client(timeout=settings.escl_timeout_sec, verify=False) as client:
+    with httpx.Client(
+        timeout=settings.escl_timeout_sec,
+        verify=False,
+        trust_env=settings.http_trust_env,
+    ) as client:
         resp = client.get(url)
         resp.raise_for_status()
         supplies = _parse_hp_ews_xml(resp.text)
