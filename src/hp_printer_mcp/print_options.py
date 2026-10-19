@@ -5,6 +5,8 @@ import sys
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from hp_printer_mcp.media import resolve_media, resolve_media_type
+
 
 @dataclass
 class PrintSettings:
@@ -16,13 +18,23 @@ class PrintSettings:
     color: str = "color"
     duplex: str = "none"
     page_range: str = "all"
+    borderless: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 ORIENTATIONS = {"portrait", "landscape"}
-COLORS = {"color", "monochrome", "grayscale", "bw", "black_and_white"}
+COLORS = {
+    "color",
+    "monochrome",
+    "grayscale",
+    "bw",
+    "black_and_white",
+    "auto",
+    "auto-monochrome",
+    "auto_monochrome",
+}
 DUPLEX_MODES = {"none", "long_edge", "short_edge", "simplex", "duplex_long", "duplex_short"}
 QUALITIES = {"draft", "normal", "high", "best"}
 PAPER_TYPES = {"plain", "photo", "cardstock", "envelope", "labels", "transparency"}
@@ -66,6 +78,7 @@ def normalize_print_settings(
     color: str = "color",
     duplex: str = "none",
     page_range: str = "all",
+    borderless: bool = False,
 ) -> PrintSettings:
     if copies < 1:
         raise ValueError("copies must be >= 1")
@@ -74,26 +87,22 @@ def normalize_print_settings(
     if orientation_key not in ORIENTATIONS:
         raise ValueError(f"orientation must be one of: {', '.join(sorted(ORIENTATIONS))}")
 
-    paper_key = paper.strip().upper().replace(" ", "")
-    if paper_key not in PAPER_SIZES:
-        supported = ", ".join(sorted(PAPER_SIZES))
-        raise ValueError(f"paper must be one of: {supported}")
-
-    paper_type_key = paper_type.strip().lower()
-    if paper_type_key not in PAPER_TYPES:
-        supported = ", ".join(sorted(PAPER_TYPES))
-        raise ValueError(f"paper_type must be one of: {supported}")
+    media = resolve_media(paper)
+    paper_key = media.name
+    paper_type_key, _media_type = resolve_media_type(paper_type)
 
     quality_key = quality.strip().lower()
     if quality_key not in QUALITIES:
         supported = ", ".join(sorted(QUALITIES))
         raise ValueError(f"quality must be one of: {supported}")
 
-    color_key = color.strip().lower()
-    if color_key in {"bw", "black_and_white", "grayscale"}:
+    color_key = color.strip().lower().replace("_", "-")
+    if color_key in {"bw", "black-and-white", "black_and_white", "grayscale", "grey", "gray"}:
         color_key = "monochrome"
-    if color_key not in {"color", "monochrome"}:
-        raise ValueError("color must be 'color' or 'monochrome'")
+    if color_key in {"auto-mono", "automonochrome"}:
+        color_key = "auto-monochrome"
+    if color_key not in {"color", "monochrome", "auto", "auto-monochrome"}:
+        raise ValueError("color must be 'color', 'monochrome', 'auto', or 'auto-monochrome'")
 
     duplex_key = duplex.strip().lower()
     duplex_aliases = {
@@ -119,6 +128,13 @@ def normalize_print_settings(
             f"Invalid page_range {page_range_key!r}; use 'all' or e.g. '1-4,7'"
         )
 
+    if isinstance(borderless, str):
+        borderless_value = borderless.strip().lower() in {"1", "true", "yes", "on"}
+    elif isinstance(borderless, bool):
+        borderless_value = borderless
+    else:
+        raise ValueError("borderless must be true or false")
+
     return PrintSettings(
         copies=copies,
         orientation=orientation_key,
@@ -128,6 +144,7 @@ def normalize_print_settings(
         color=color_key,
         duplex=duplex_key,
         page_range=page_range_key,
+        borderless=borderless_value,
     )
 
 
@@ -222,6 +239,10 @@ def apply_settings_to_devmode(devmode: Any, settings: PrintSettings) -> Any:
         if settings.orientation == "landscape"
         else const["DMORIENT_PORTRAIT"]
     )
+    if settings.paper not in PAPER_SIZES:
+        raise ValueError(
+            f"Windows DEVMODE path has no DMPAPER id for paper {settings.paper!r}"
+        )
     devmode.PaperSize = PAPER_SIZES[settings.paper]
     devmode.Copies = settings.copies
     devmode.Color = (

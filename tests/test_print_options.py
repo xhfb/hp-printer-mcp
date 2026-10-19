@@ -46,3 +46,20 @@ def test_parse_page_range_out_of_bounds():
 def test_invalid_paper():
     with pytest.raises(ValueError):
         normalize_print_settings(paper="INVALID")
+
+
+def test_a3_is_rejected():
+    with pytest.raises(ValueError, match="Unknown paper"):
+        normalize_print_settings(paper="A3")
+
+
+def test_photo_sizes_and_types():
+    photo = normalize_print_settings(paper="4x6", paper_type="photo", borderless=True)
+    assert photo.paper == "4X6"
+    assert photo.paper_type == "photo"
+    assert photo.borderless is True
+    auto = normalize_print_settings(color="auto")
+    assert auto.color == "auto"
+    hagaki = normalize_print_settings(paper="Hagaki", paper_type="matte")
+    assert hagaki.paper == "HAGAKI"
+    assert hagaki.paper_type == "matte"

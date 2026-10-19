@@ -1,15 +1,22 @@
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from unittest.mock import patch
 
+import fitz
 import httpx
 import pytest
+from PIL import Image
 
-from hp_printer_mcp.config import load_settings
+from hp_printer_mcp.config import load_settings, ok
 from hp_printer_mcp.scan_escl import (
     _build_scan_settings_xml,
+    _merge_pdf_pages,
     get_scan_capabilities,
     get_scanner_status,
+    parse_scanner_capabilities,
     scan_region_for_paper,
+    scan_to_file,
+    validate_scan_request,
 )
 
 
@@ -80,6 +87,21 @@ def test_build_scan_settings_xml():
     assert "3508" in text_blob
 
 
+def test_jpeg_scan_pdf_uses_scan_dpi_for_page_size():
+    image = Image.new("RGB", (2480, 3508), "white")
+    raw = BytesIO()
+    image.save(raw, format="JPEG")
+    payload = raw.getvalue()
+    pdf = _merge_pdf_pages([payload, payload], dpi=300)
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    try:
+        assert doc.page_count == 2
+        assert doc[0].rect.width == pytest.approx(595.2, abs=0.2)
+        assert doc[0].rect.height == pytest.approx(841.92, abs=0.2)
+    finally:
+        doc.close()
+
+
 def test_scan_region_b5():
     assert scan_region_for_paper("B5") == (2079, 2953)
 
@@ -132,6 +154,151 @@ def test_load_settings_defaults(tmp_path, monkeypatch):
     settings = load_settings()
     assert settings.printer_host == "10.0.0.5"
     assert settings.escl_base == "http://10.0.0.5/eSCL"
+
+
+SPLIT_CAPS_XML = """<?xml version="1.0"?>
+<scan:ScannerCapabilities xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03"
+  xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">
+  <scan:Platen>
+    <scan:PlatenInputCaps>
+      <scan:MinWidth>8</scan:MinWidth>
+      <scan:MaxWidth>2550</scan:MaxWidth>
+      <scan:MinHeight>8</scan:MinHeight>
+      <scan:MaxHeight>3508</scan:MaxHeight>
+      <scan:SettingProfiles>
+        <scan:SettingProfile>
+          <scan:ColorModes>
+            <scan:ColorMode>BlackAndWhite1</scan:ColorMode>
+            <scan:ColorMode>Grayscale8</scan:ColorMode>
+            <scan:ColorMode>RGB24</scan:ColorMode>
+          </scan:ColorModes>
+          <scan:DocumentFormats>
+            <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
+            <pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>
+          </scan:DocumentFormats>
+          <scan:SupportedResolutions>
+            <scan:DiscreteResolutions>
+              <scan:DiscreteResolution>
+                <scan:XResolution>300</scan:XResolution>
+                <scan:YResolution>300</scan:YResolution>
+              </scan:DiscreteResolution>
+              <scan:DiscreteResolution>
+                <scan:XResolution>600</scan:XResolution>
+                <scan:YResolution>600</scan:YResolution>
+              </scan:DiscreteResolution>
+            </scan:DiscreteResolutions>
+          </scan:SupportedResolutions>
+        </scan:SettingProfile>
+      </scan:SettingProfiles>
+    </scan:PlatenInputCaps>
+  </scan:Platen>
+  <scan:Adf>
+    <scan:AdfSimplexInputCaps>
+      <scan:MinWidth>900</scan:MinWidth>
+      <scan:MaxWidth>2550</scan:MaxWidth>
+      <scan:MinHeight>1500</scan:MinHeight>
+      <scan:MaxHeight>4200</scan:MaxHeight>
+      <scan:SettingProfiles>
+        <scan:SettingProfile>
+          <scan:ColorModes>
+            <scan:ColorMode>RGB24</scan:ColorMode>
+          </scan:ColorModes>
+          <scan:DocumentFormats>
+            <pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
+            <pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>
+          </scan:DocumentFormats>
+          <scan:SupportedResolutions>
+            <scan:DiscreteResolutions>
+              <scan:DiscreteResolution>
+                <scan:XResolution>300</scan:XResolution>
+                <scan:YResolution>300</scan:YResolution>
+              </scan:DiscreteResolution>
+            </scan:DiscreteResolutions>
+          </scan:SupportedResolutions>
+        </scan:SettingProfile>
+      </scan:SettingProfiles>
+    </scan:AdfSimplexInputCaps>
+  </scan:Adf>
+</scan:ScannerCapabilities>"""
+
+
+def _split_caps() -> dict:
+    return parse_scanner_capabilities(ET.fromstring(SPLIT_CAPS_XML))
+
+
+def test_scan_rejects_png_adf_600_and_oversized_platen():
+    caps = _split_caps()
+    with pytest.raises(ValueError, match="image/png"):
+        validate_scan_request(
+            caps,
+            source="Platen",
+            dpi=300,
+            format="png",
+            color_mode="RGB24",
+            paper="A4",
+            orientation="portrait",
+        )
+    with pytest.raises(ValueError, match="Feeder does not support 600"):
+        validate_scan_request(
+            caps,
+            source="ADF",
+            dpi=600,
+            format="pdf",
+            color_mode="RGB24",
+            paper="A4",
+            orientation="portrait",
+        )
+    with pytest.raises(ValueError, match="taller than the Platen"):
+        validate_scan_request(
+            caps,
+            source="Platen",
+            dpi=300,
+            format="pdf",
+            color_mode="RGB24",
+            paper="Legal",
+            orientation="portrait",
+        )
+    checked = validate_scan_request(
+        caps,
+        source="Platen",
+        dpi=600,
+        format="pdf",
+        color_mode="BlackAndWhite1",
+        paper="A4",
+        orientation="portrait",
+    )
+    assert checked["color_mode"] == "BlackAndWhite1"
+
+
+def test_scan_to_file_warns_when_jpeg_drops_extra_pages(settings, tmp_path):
+    caps = _split_caps()
+    idle = ok({"scanner_state": "Idle", "adf_state": None, "adf_loaded": None, "is_idle": True})
+    jpeg = b"\xff\xd8\xff\xd9"
+
+    with (
+        patch("hp_printer_mcp.scan_escl.get_scanner_status", return_value=idle),
+        patch("hp_printer_mcp.scan_escl.get_scan_capabilities", return_value=ok(caps)),
+        patch("hp_printer_mcp.scan_escl._create_scan_job", return_value="job-1"),
+        patch("hp_printer_mcp.scan_escl._poll_scan_job", return_value=["http://printer/NextDocument"]),
+        patch(
+            "hp_printer_mcp.scan_escl._fetch_scan_pages_via_next_document",
+            return_value=[jpeg, jpeg],
+        ),
+    ):
+        result = scan_to_file(
+            settings,
+            source="Platen",
+            dpi=300,
+            format="jpeg",
+            paper="A4",
+            output_path=str(tmp_path / "output" / "scan.jpg"),
+            include_base64=False,
+        )
+
+    assert result["success"] is True, result
+    assert result["data"]["page_count"] == 2
+    assert "only page 1" in " ".join(result["data"]["warnings"])
+    assert (tmp_path / "output" / "scan.jpg").read_bytes() == jpeg
 
 
 def test_settings_path_guard(settings, tmp_path):

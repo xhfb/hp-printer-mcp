@@ -1,4 +1,5 @@
-from typing import Any, Optional
+import os
+from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -17,31 +18,29 @@ from hp_printer_mcp.scan_escl import get_scanner_status as run_get_scanner_statu
 from hp_printer_mcp.scan_escl import scan_to_file as run_scan_to_file
 from hp_printer_mcp.supplies import get_supply_levels as run_get_supply_levels
 
-mcp = FastMCP("hp-printer")
+_HP_VS_DETONG = (
+    "【HP Smart Tank 750】局域网 A4 办公喷墨/扫描一体机（IPP/eSCL），"
+    "不是德佟热敏标签机。禁止用本工具打标签；"
+    "标签请用 detong_list_printers / detong_print_text / detong_print_qr。"
+)
+
+mcp = FastMCP(
+    "hp-printer",
+    instructions=(
+        _HP_VS_DETONG
+        + " 默认工具：hp_print_file、hp_scan_to_file、hp_get_status、hp_cancel_job。"
+        " 发现/队列/墨量/复印等需设置 HP_MCP_EXTRA_TOOLS=1。"
+    ),
+)
 
 
-@mcp.tool()
-async def discover_printer(timeout_sec: float = 5.0) -> dict:
-    """Discover HP/network printers via mDNS and probe the configured HP_PRINTER_HOST."""
-    settings = load_settings()
-    return run_discover_printer(settings, timeout_sec=timeout_sec)
+def _extra_tools() -> bool:
+    raw = os.getenv("HP_MCP_EXTRA_TOOLS", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
-@mcp.tool()
-async def get_device_status() -> dict:
-    """Get aggregated printer/scanner status (IPP printer-state + eSCL scanner)."""
-    settings = load_settings()
-    return run_get_device_status(
-        settings,
-        scanner_status_fn=run_get_scanner_status,
-        print_queue_count_fn=print_queue_count,
-        printer_ready_fn=lambda s: is_printer_ready(s),
-        ipp_state_fn=get_ipp_printer_state,
-    )
-
-
-@mcp.tool()
-async def print_file(
+@mcp.tool(name="hp_print_file")
+async def hp_print_file(
     file_path: Optional[str] = None,
     content_base64: Optional[str] = None,
     filename: Optional[str] = None,
@@ -54,24 +53,21 @@ async def print_file(
     color: str = "color",
     duplex: str = "none",
     page_range: str = "all",
+    borderless: bool = False,
     printer_name: Optional[str] = None,
 ) -> dict:
-    """Print a document via IPP (network-native). Provide exactly one source.
+    """【HP Smart Tank 750】经 IPP 打印办公文档（PDF/图/文本）。不是德佟标签机。
 
-    Sources:
-      - file_path: local path on the MCP host
-      - content_base64 + filename: remote clients (e.g. Raspberry Pi) upload bytes
-      - url: http/https URL (RFC1918-only by default)
+    禁止打热敏标签；标签用 detong_print_text / detong_print_qr。
+    三选一：file_path 或 content_base64+filename 或 url。
+    多页会合成一个 image/pwg-raster 作业，因此双面和多份是逐份的，并返回一个 job_id。
+    横版内容会转进竖向走纸，因为这台机器只接受 portrait。
 
-    Documents are rasterized to JPEG when the printer does not accept PDF.
-
-    orientation: portrait | landscape
-    paper: A4, A3, A5, Letter, Legal, B5, ...
-    paper_type: plain | photo | cardstock | envelope | labels | transparency
-    quality: draft | normal | high | best
-    color: color | monochrome
+    paper: A4、A5、A6、Letter、Legal、4x6、Hagaki、L、2L、DL、C6 等，以打印机为准。
+    paper_type: plain、lightweight、photo、matte、brochure 等，映射到 IPP media-type。
+    borderless: true 时四边距为 0。
     duplex: none | long_edge | short_edge
-    page_range: all | e.g. 1-3,5 (PDF only)
+    color: color | monochrome | auto | auto-monochrome
     """
     settings = load_settings()
     return run_print_file(
@@ -88,40 +84,13 @@ async def print_file(
         color=color,
         duplex=duplex,
         page_range=page_range,
+        borderless=borderless,
         printer_name=printer_name,
     )
 
 
-@mcp.tool()
-async def list_print_jobs(printer_name: Optional[str] = None) -> dict:
-    """List current print jobs on the printer via IPP Get-Jobs."""
-    settings = load_settings()
-    return run_list_print_jobs(settings, printer_name=printer_name)
-
-
-@mcp.tool()
-async def cancel_print_job(job_id: int, printer_name: Optional[str] = None) -> dict:
-    """Cancel a print job by IPP job ID."""
-    settings = load_settings()
-    return run_cancel_print_job(settings, job_id=job_id, printer_name=printer_name)
-
-
-@mcp.tool()
-async def get_scan_capabilities() -> dict:
-    """Return eSCL scanner capabilities (resolutions, formats, ADF/platen sources)."""
-    settings = load_settings()
-    return run_get_scan_capabilities(settings)
-
-
-@mcp.tool()
-async def get_scanner_status() -> dict:
-    """Return eSCL scanner status including idle/busy state and ADF load state."""
-    settings = load_settings()
-    return run_get_scanner_status(settings)
-
-
-@mcp.tool()
-async def scan_to_file(
+@mcp.tool(name="hp_scan_to_file")
+async def hp_scan_to_file(
     source: str = "Platen",
     dpi: int = 300,
     format: str = "pdf",
@@ -131,11 +100,11 @@ async def scan_to_file(
     output_path: Optional[str] = None,
     include_base64: Optional[bool] = None,
 ) -> dict:
-    """Scan from platen or ADF and save to a local file (pdf/jpeg/png).
+    """【HP Smart Tank 750】平板或 ADF 扫描为 PDF/JPEG。不是德佟标签机。
 
-    paper: A4, A5, B5, Letter, ... or MAX for full scan area.
-    orientation: portrait | landscape
-    include_base64: if true, also return content_base64 for remote clients
+    source: Platen（稿台）或 Feeder/ADF。纸张、dpi、格式和颜色会按该扫描源的 eSCL 能力校验。
+    稿台最高 1200 dpi，ADF 最高 300 dpi。设备不支持 PNG。
+    color_mode: RGB24、Grayscale8、BlackAndWhite1。
     """
     settings = load_settings()
     return run_scan_to_file(
@@ -151,38 +120,89 @@ async def scan_to_file(
     )
 
 
-@mcp.tool()
-async def get_supply_levels() -> dict:
-    """Read ink/supply levels via HP EWS, SNMP, or IPP (best effort)."""
-    settings = load_settings()
-    return run_get_supply_levels(settings)
+@mcp.tool(name="hp_get_status")
+async def hp_get_status() -> dict:
+    """【HP Smart Tank 750】主机是否可达、IPP 打印状态、eSCL 扫描状态。
 
-
-@mcp.tool()
-async def copy_document(
-    source: str = "Platen",
-    copies: int = 1,
-    orientation: str = "portrait",
-    paper: str = "A4",
-    paper_type: str = "plain",
-    quality: str = "normal",
-    color: str = "color",
-    duplex: str = "none",
-    dpi: int = 300,
-    format: str = "pdf",
-) -> dict:
-    """Copy by scanning then printing via eSCL + IPP (software workflow)."""
+    不是 detong_get_status（那是德佟标签机 / dtpweb）。
+    """
     settings = load_settings()
-    return run_copy_document(
+    return run_get_device_status(
         settings,
-        source=source,
-        copies=copies,
-        orientation=orientation,
-        paper=paper,
-        paper_type=paper_type,
-        quality=quality,
-        color=color,
-        duplex=duplex,
-        dpi=dpi,
-        format=format,
+        scanner_status_fn=run_get_scanner_status,
+        print_queue_count_fn=print_queue_count,
+        printer_ready_fn=lambda s: is_printer_ready(s),
+        ipp_state_fn=get_ipp_printer_state,
     )
+
+
+@mcp.tool(name="hp_cancel_job")
+async def hp_cancel_job(job_id: int, printer_name: Optional[str] = None) -> dict:
+    """【HP Smart Tank 750】按 IPP job_id 取消打印任务（通常来自 hp_print_file 返回值）。
+
+    不是 detong_close。查历史队列请开 HP_MCP_EXTRA_TOOLS 后用 hp_list_jobs。
+    """
+    settings = load_settings()
+    return run_cancel_print_job(settings, job_id=job_id, printer_name=printer_name)
+
+
+if _extra_tools():
+
+    @mcp.tool(name="hp_discover_printer")
+    async def hp_discover_printer(timeout_sec: float = 5.0) -> dict:
+        """【HP】mDNS 发现并探测 HP_PRINTER_HOST。IP 已固定时一般不用。"""
+        settings = load_settings()
+        return run_discover_printer(settings, timeout_sec=timeout_sec)
+
+    @mcp.tool(name="hp_list_jobs")
+    async def hp_list_jobs(printer_name: Optional[str] = None) -> dict:
+        """【HP Smart Tank 750】列出 IPP 打印队列。"""
+        settings = load_settings()
+        return run_list_print_jobs(settings, printer_name=printer_name)
+
+    @mcp.tool(name="hp_get_scan_capabilities")
+    async def hp_get_scan_capabilities() -> dict:
+        """【HP】eSCL 扫描能力（分辨率、格式、稿台/ADF）。"""
+        settings = load_settings()
+        return run_get_scan_capabilities(settings)
+
+    @mcp.tool(name="hp_get_scanner_status")
+    async def hp_get_scanner_status() -> dict:
+        """【HP】eSCL 扫描头空闲/忙、ADF 是否有纸。日常用 hp_get_status 即可。"""
+        settings = load_settings()
+        return run_get_scanner_status(settings)
+
+    @mcp.tool(name="hp_get_supply_levels")
+    async def hp_get_supply_levels() -> dict:
+        """【HP】墨量（EWS/SNMP/IPP，尽力而为）。"""
+        settings = load_settings()
+        return run_get_supply_levels(settings)
+
+    @mcp.tool(name="hp_copy_document")
+    async def hp_copy_document(
+        source: str = "Platen",
+        copies: int = 1,
+        orientation: str = "portrait",
+        paper: str = "A4",
+        paper_type: str = "plain",
+        quality: str = "normal",
+        color: str = "color",
+        duplex: str = "none",
+        dpi: int = 300,
+        format: str = "pdf",
+    ) -> dict:
+        """【HP】软件复印：先扫描再 IPP 打印。不是德佟标签。"""
+        settings = load_settings()
+        return run_copy_document(
+            settings,
+            source=source,
+            copies=copies,
+            orientation=orientation,
+            paper=paper,
+            paper_type=paper_type,
+            quality=quality,
+            color=color,
+            duplex=duplex,
+            dpi=dpi,
+            format=format,
+        )

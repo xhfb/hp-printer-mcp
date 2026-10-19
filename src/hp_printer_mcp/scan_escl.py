@@ -42,6 +42,207 @@ def _find_all_text(root: ET.Element, name: str) -> list[str]:
     return values
 
 
+def _elements_named(root: ET.Element, name: str) -> list[ET.Element]:
+    return [elem for elem in root.iter() if _local(elem.tag) == name]
+
+
+def _int_desc(elem: ET.Element, name: str) -> int | None:
+    text = _find_text(elem, name)
+    if text and text.lstrip("-").isdigit():
+        return int(text)
+    return None
+
+
+def _unique(values: list[str]) -> list[str]:
+    found: list[str] = []
+    for value in values:
+        if value and value not in found:
+            found.append(value)
+    return found
+
+
+def _collect_resolutions(elem: ET.Element) -> list[dict[str, int]]:
+    found: list[dict[str, int]] = []
+    for node in elem.iter():
+        if _local(node.tag) != "DiscreteResolution":
+            continue
+        x = _find_text(node, "XResolution")
+        y = _find_text(node, "YResolution")
+        if x and y:
+            item = {"x": int(x), "y": int(y)}
+            if item not in found:
+                found.append(item)
+    return found
+
+
+def _source_record(elem: ET.Element) -> dict[str, Any]:
+    return {
+        "resolutions": _collect_resolutions(elem),
+        "document_formats": sorted(
+            {
+                item
+                for item in _find_all_text(elem, "DocumentFormat")
+                + _find_all_text(elem, "DocumentFormatExt")
+                if item
+            }
+        ),
+        "color_modes": _unique(_find_all_text(elem, "ColorMode")),
+        "color_spaces": _unique(_find_all_text(elem, "ColorSpace")),
+        "min_width": _int_desc(elem, "MinWidth"),
+        "max_width": _int_desc(elem, "MaxWidth"),
+        "min_height": _int_desc(elem, "MinHeight"),
+        "max_height": _int_desc(elem, "MaxHeight"),
+    }
+
+
+def _merge_sources(records: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = _source_record(ET.Element("empty"))
+    merged["resolutions"] = []
+    for record in records:
+        for item in record["resolutions"]:
+            if item not in merged["resolutions"]:
+                merged["resolutions"].append(item)
+        for key in ("document_formats", "color_modes", "color_spaces"):
+            merged[key] = sorted(set(merged[key]) | set(record[key]))
+        for key in ("min_width", "min_height"):
+            values = [value for value in (merged[key], record[key]) if value is not None]
+            merged[key] = min(values) if values else None
+        for key in ("max_width", "max_height"):
+            values = [value for value in (merged[key], record[key]) if value is not None]
+            merged[key] = max(values) if values else None
+    return merged
+
+
+def parse_scanner_capabilities(root: ET.Element) -> dict[str, Any]:
+    """Flatten eSCL ScannerCapabilities, keeping Platen and Feeder limits apart."""
+    sources: dict[str, dict[str, Any]] = {}
+    platen = _elements_named(root, "PlatenInputCaps")
+    if platen:
+        sources["Platen"] = _merge_sources([_source_record(elem) for elem in platen])
+    feeder = _elements_named(root, "AdfSimplexInputCaps") + _elements_named(
+        root, "AdfDuplexInputCaps"
+    )
+    if not feeder:
+        feeder = _elements_named(root, "AdfInputCaps")
+    if feeder:
+        sources["Feeder"] = _merge_sources([_source_record(elem) for elem in feeder])
+
+    resolutions = _collect_resolutions(root)
+    formats = sorted(
+        {
+            item
+            for item in _find_all_text(root, "DocumentFormat")
+            + _find_all_text(root, "DocumentFormatExt")
+            if item
+        }
+    )
+    input_sources = _unique(_find_all_text(root, "InputSource")) or ["Platen", "Feeder"]
+    return {
+        "resolutions": resolutions,
+        "document_formats": formats,
+        "input_sources": input_sources,
+        "color_spaces": _unique(_find_all_text(root, "ColorSpace")) or ["RGB24", "Grayscale8"],
+        "color_modes": _unique(_find_all_text(root, "ColorMode")),
+        "sources": sources,
+    }
+
+
+def _scan_source_key(source: str) -> str:
+    key = source.strip().lower()
+    if key in {"platen", "flatbed", "glass"}:
+        return "Platen"
+    if key in {"adf", "feeder"}:
+        return "Feeder"
+    raise ValueError("source must be Platen or Feeder/ADF")
+
+
+def _match_token(value: str, choices: list[str]) -> str | None:
+    for choice in choices:
+        if choice.lower() == value.lower():
+            return choice
+    return None
+
+
+def validate_scan_request(
+    caps: dict[str, Any],
+    *,
+    source: str,
+    dpi: int,
+    format: str,
+    color_mode: str,
+    paper: str,
+    orientation: str,
+) -> dict[str, Any]:
+    """Reject dpi, format, color, and paper the selected source cannot do."""
+    source_key = _scan_source_key(source)
+    sources = caps.get("sources") or {}
+    if sources:
+        if source_key not in sources:
+            available = ", ".join(sorted(sources)) or "none"
+            raise ValueError(f"Scanner has no {source_key} source. Available: {available}")
+        selected = sources[source_key]
+    else:
+        selected = None
+
+    mime = _mime_for_format(format)
+    formats = (selected or {}).get("document_formats") or caps.get("document_formats") or []
+    if formats and mime not in formats:
+        friendly = ", ".join(formats)
+        raise ValueError(
+            f"format {format!r} ({mime}) is not supported on {source_key}. "
+            f"Scanner accepts: {friendly}"
+        )
+
+    resolutions = (selected or {}).get("resolutions") or caps.get("resolutions") or []
+    allowed_dpi = sorted({item["x"] for item in resolutions if item.get("x") == item.get("y")})
+    if allowed_dpi and dpi not in allowed_dpi:
+        raise ValueError(
+            f"{source_key} does not support {dpi} dpi. Supported dpi: "
+            + ", ".join(str(item) for item in allowed_dpi)
+        )
+
+    color_choices = (selected or {}).get("color_modes") or caps.get("color_modes") or []
+    if not color_choices:
+        color_choices = (selected or {}).get("color_spaces") or caps.get("color_spaces") or []
+    canonical_color = color_mode
+    if color_choices:
+        matched = _match_token(color_mode, color_choices)
+        if matched is None:
+            raise ValueError(
+                f"color_mode {color_mode!r} is not supported on {source_key}. "
+                f"Supported: {', '.join(color_choices)}"
+            )
+        canonical_color = matched
+
+    region = scan_region_for_paper(paper, orientation=orientation)
+    limits = selected or {}
+    if region is not None and limits:
+        width, height = region
+        checks = (
+            ("max_width", width, "wider"),
+            ("max_height", height, "taller"),
+        )
+        for limit_name, actual, word in checks:
+            limit = limits.get(limit_name)
+            if limit is not None and actual > limit:
+                raise ValueError(
+                    f"paper {paper!r} is {word} than the {source_key} scan area "
+                    f"({actual} > {limit} in 1/300 inch units)"
+                )
+        for limit_name, actual, word in (
+            ("min_width", width, "narrower"),
+            ("min_height", height, "shorter"),
+        ):
+            limit = limits.get(limit_name)
+            if limit is not None and actual < limit:
+                raise ValueError(
+                    f"paper {paper!r} is {word} than the {source_key} minimum "
+                    f"({actual} < {limit} in 1/300 inch units)"
+                )
+
+    return {"mime_type": mime, "color_mode": canonical_color, "source_key": source_key}
+
+
 def _client(settings: Settings) -> httpx.Client:
     return make_client(settings)
 
@@ -77,36 +278,7 @@ def get_scan_capabilities(settings: Settings) -> dict[str, Any]:
     except httpx.HTTPError as exc:
         return fail(f"Failed to fetch scanner capabilities: {exc}")
 
-    resolutions: list[dict[str, int]] = []
-    for elem in root.iter():
-        if _local(elem.tag) == "DiscreteResolution":
-            x = _find_text(elem, "XResolution")
-            y = _find_text(elem, "YResolution")
-            if x and y:
-                resolutions.append({"x": int(x), "y": int(y)})
-
-    formats = _find_all_text(root, "DocumentFormat")
-    formats += _find_all_text(root, "DocumentFormatExt")
-    formats = sorted({f for f in formats if f})
-
-    sources: list[str] = []
-    for elem in root.iter():
-        if _local(elem.tag) == "InputSource":
-            text = (elem.text or "").strip()
-            if text:
-                sources.append(text)
-
-    color_spaces = _find_all_text(root, "ColorSpace")
-    color_spaces = sorted({c for c in color_spaces if c})
-
-    return ok(
-        {
-            "resolutions": resolutions,
-            "document_formats": formats,
-            "input_sources": sources or ["Platen", "Feeder"],
-            "color_spaces": color_spaces or ["RGB24", "Grayscale8"],
-        }
-    )
+    return ok(parse_scanner_capabilities(root))
 
 
 def get_scanner_status(settings: Settings) -> dict[str, Any]:
@@ -376,7 +548,7 @@ def _is_pdf(data: bytes) -> bool:
     return data[:4] == b"%PDF"
 
 
-def _merge_pdf_pages(pages: list[bytes]) -> bytes:
+def _merge_pdf_pages(pages: list[bytes], *, dpi: int = 300) -> bytes:
     """Merge scan pages into one PDF (HP often returns JPEG per page)."""
     from io import BytesIO
 
@@ -405,15 +577,34 @@ def _merge_pdf_pages(pages: list[bytes]) -> bytes:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         images.append(img)
+    try:
+        return _save_images_as_pdf(images, dpi=dpi)
+    finally:
+        for img in images:
+            img.close()
 
-    out = BytesIO()
-    images[0].save(out, format="PDF", save_all=True, append_images=images[1:])
+
+def _save_images_as_pdf(images: list, *, dpi: int) -> bytes:
+    """Write scan images at their scan resolution so the page is A4, not 1 px = 1 pt."""
+    from io import BytesIO
+
+    if dpi < 1:
+        raise ValueError("dpi must be >= 1")
+    resolution = float(dpi)
     for img in images:
-        img.close()
+        img.info["dpi"] = (resolution, resolution)
+    out = BytesIO()
+    images[0].save(
+        out,
+        format="PDF",
+        save_all=True,
+        append_images=images[1:],
+        resolution=resolution,
+    )
     return out.getvalue()
 
 
-def _single_page_as_pdf(page_data: bytes) -> bytes:
+def _single_page_as_pdf(page_data: bytes, *, dpi: int = 300) -> bytes:
     if _is_pdf(page_data):
         return page_data
     from io import BytesIO
@@ -423,10 +614,10 @@ def _single_page_as_pdf(page_data: bytes) -> bytes:
     img = Image.open(BytesIO(page_data))
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
-    out = BytesIO()
-    img.save(out, format="PDF")
-    img.close()
-    return out.getvalue()
+    try:
+        return _save_images_as_pdf([img], dpi=dpi)
+    finally:
+        img.close()
 
 
 def scan_to_file(
@@ -464,8 +655,22 @@ def scan_to_file(
                 f"adf_loaded={scanner_data.get('adf_loaded')})"
             )
 
+    caps = get_scan_capabilities(settings)
+    if not caps.get("success"):
+        return caps
+
     try:
-        mime_type = _mime_for_format(format)
+        checked = validate_scan_request(
+            caps["data"],
+            source=source,
+            dpi=dpi,
+            format=format,
+            color_mode=color_mode,
+            paper=paper,
+            orientation=orientation,
+        )
+        mime_type = checked["mime_type"]
+        color_mode = checked["color_mode"]
         paper_key = normalize_scan_paper(paper)
         scan_region = scan_region_for_paper(paper, orientation=orientation)
     except ValueError as exc:
@@ -501,12 +706,21 @@ def scan_to_file(
         return fail(f"Scan failed: {exc}")
 
     fmt_key = format.lower().lstrip(".")
+    warnings: list[str] = []
     if fmt_key == "pdf":
-        content = _merge_pdf_pages(pages) if len(pages) > 1 else _single_page_as_pdf(pages[0])
+        content = (
+            _merge_pdf_pages(pages, dpi=dpi)
+            if len(pages) > 1
+            else _single_page_as_pdf(pages[0], dpi=dpi)
+        )
     elif len(pages) == 1:
         content = pages[0]
     else:
         content = pages[0]
+        warnings.append(
+            f"Scanner returned {len(pages)} JPEG pages; only page 1 was saved. "
+            "Use format=pdf for a multi-page document."
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
@@ -521,6 +735,8 @@ def scan_to_file(
         "paper": paper_key or "MAX",
         "orientation": orientation.strip().lower(),
     }
+    if warnings:
+        result["warnings"] = warnings
     if scan_region is not None:
         result["scan_region_units"] = {
             "width": scan_region[0],

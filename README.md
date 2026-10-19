@@ -1,12 +1,14 @@
 # HP Printer MCP
 
-MCP server for **HP Smart Tank 750** (network-connected). Exposes print, scan, copy, status, and supply-level tools for Cursor agents.
+MCP server for **HP Smart Tank 750** (network-connected). Default tools: print, scan, status, cancel. Extra tools (discover / jobs / supplies / copy) behind `HP_MCP_EXTRA_TOOLS=1`.
+
+工具一律 `hp_*`，与德佟标签机 `detong_*` 分开，不要混用。
 
 ## Protocols (network-native)
 
 | Feature | Protocol |
 |---------|----------|
-| Print | **IPP** (`ipp://{host}:631/ipp/print`) — documents rasterized to JPEG when PDF is unsupported |
+| Print | **IPP** (`ipp://{host}:631/ipp/print`) — multi-page documents become one `image/pwg-raster` job (duplex and collated copies). JPEG is only a per-page fallback |
 | Scan | **eSCL** (`http://{host}/eSCL/`) |
 | Supplies | HP EWS → SNMP → IPP (best effort) |
 
@@ -34,6 +36,7 @@ HP_PRINTER_NAME=HP Smart Tank 750
 HP_IPP_URI=ipp://192.168.31.11:631/ipp/print
 HP_SCAN_OUTPUT_DIR=./output
 HP_HTTP_TRUST_ENV=false
+# HP_MCP_EXTRA_TOOLS=1
 ```
 
 ## Run
@@ -80,33 +83,32 @@ Workstation still registers this server in MCP Router. LAN clients (e.g. Raspber
 
 ## MCP tools
 
+默认 4 个（办公喷墨，**不是**德佟标签）：
+
 | Tool | Description |
 |------|-------------|
-| `discover_printer` | mDNS discovery + probe configured host |
-| `get_device_status` | Host reachability, eSCL scanner, IPP printer-state |
-| `print_file` | Print via IPP — `file_path` **or** `content_base64`+`filename` **or** `url` |
-| `list_print_jobs` | List IPP jobs |
-| `cancel_print_job` | Cancel by IPP `job_id` |
-| `get_scan_capabilities` | eSCL resolutions, formats, sources |
-| `get_scanner_status` | Idle/busy, ADF loaded |
-| `scan_to_file` | Scan to PDF/JPEG/PNG; optional `content_base64` in response |
-| `get_supply_levels` | Ink levels (best effort) |
-| `copy_document` | Scan then IPP-print |
+| `hp_print_file` | IPP 打 PDF/图/文本；成功返回 `job_id` |
+| `hp_scan_to_file` | eSCL 扫描到 PDF/JPEG（不支持 PNG） |
+| `hp_get_status` | 主机 / IPP / 扫描头状态 |
+| `hp_cancel_job` | 按 IPP `job_id` 取消 |
+
+设 `HP_MCP_EXTRA_TOOLS=1` 才注册：`hp_discover_printer`、`hp_list_jobs`、`hp_get_scan_capabilities`、`hp_get_scanner_status`、`hp_get_supply_levels`、`hp_copy_document`。
 
 All tools return JSON: `{ "success": bool, "error": string|null, "data": ... }`.
 
-### Print settings (`print_file`)
+### Print settings (`hp_print_file`)
 
 | Parameter | Values | Notes |
 |-----------|--------|-------|
 | `file_path` / `content_base64`+`filename` / `url` | one required | remote clients should use base64 |
-| `orientation` | `portrait`, `landscape` | |
-| `paper` | `A4`, `A3`, `A5`, `Letter`, … | mapped to IPP `media` |
-| `paper_type` | `plain`, `photo`, … | may be ignored over IPP (warning returned) |
-| `quality` | `draft`, `normal`, `high`, `best` | IPP print-quality |
-| `color` | `color`, `monochrome` | |
-| `duplex` | `none`, `long_edge`, `short_edge` | |
-| `copies` | integer ≥ 1 | |
+| `orientation` | `portrait`, `landscape` | landscape is composed wide, then rotated into the portrait feed |
+| `paper` | `A4`, `A5`, `A6`, `Letter`, `Legal`, `4x6`, `Hagaki`, `L`, `2L`, `DL`, `C6`, `#10`, `JISB5`, … | checked against the printer `media-supported` list. No A3. `B5` is ISO 176×250 mm; office B5 in China is `JISB5` (182×257 mm) |
+| `paper_type` | `plain`, `lightweight`, `photo`, `matte`, `brochure`, … | sent as IPP `media-type` inside `media-col` |
+| `borderless` | `true` / `false` | `true` asks for 0 mm margins when that size and type allow it |
+| `quality` | `draft`, `normal`, `high`, `best` | IPP print-quality. Raster stays 300 dpi when the printer offers it |
+| `color` | `color`, `monochrome`, `auto`, `auto-monochrome` | checked against `print-color-mode-supported` |
+| `duplex` | `none`, `long_edge`, `short_edge` | one PWG job, so the back side is actually printed |
+| `copies` | integer ≥ 1, within `copies-supported` | collated by repeating the page sequence inside the one PWG document. IPP `copies` stays 1 so this printer does not drop or double them |
 | `page_range` | `all` or `1-3,5` | PDF only |
 
 ## Security
@@ -125,7 +127,9 @@ All tools return JSON: `{ "success": bool, "error": string|null, "data": ... }`.
 | IPP 401 | Check `HP_IPP_USERNAME` / `HP_IPP_PASSWORD` (guest often works) |
 | Scan 502 on Windows only | Ensure `HP_HTTP_TRUST_ENV=false`; clear HTTP_PROXY for that host |
 | Office `.docx` print fails | Convert to PDF/TXT first (IPP path rasterizes PDF/images/text) |
-| Blank / wrong size | Check `paper` + `orientation`; Smart Tank receives JPEG pages |
+| Blank / wrong size | Check `paper` + `orientation`. Pages are one PWG raster sized to the media keyword |
+| Scan rejected | dpi, format, and paper are checked per source. ADF tops out at 300 dpi; PNG is not a scanner format. Scan `B5` is ISO 176×250 mm |
+| JPEG scan keeps one page | Use `format=pdf` when the feeder returns more than one page |
 
 ## Tests
 

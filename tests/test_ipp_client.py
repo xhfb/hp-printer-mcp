@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from hp_printer_mcp.ipp_client import (
     OP_GET_PRINTER_ATTRIBUTES,
+    TAG_BEGIN_COLLECTION,
     TAG_CHARSET,
+    TAG_INTEGER,
     TAG_KEYWORD,
     TAG_NATURAL_LANGUAGE,
     TAG_URI,
+    IppCollection,
     build_request,
     http_url_from_ipp_uri,
     parse_response,
@@ -50,3 +53,36 @@ def test_build_and_parse_roundtrip_status():
     parsed = parse_response(bytes(raw))
     assert parsed.ok
     assert parsed.first("printer-state") == 3
+
+
+def test_media_col_collection_roundtrip():
+    size = IppCollection(
+        members=(
+            (TAG_INTEGER, "x-dimension", 21000),
+            (TAG_INTEGER, "y-dimension", 29700),
+        )
+    )
+    media_col = IppCollection(
+        members=(
+            (TAG_BEGIN_COLLECTION, "media-size", size),
+            (TAG_INTEGER, "media-top-margin", 296),
+            (TAG_INTEGER, "media-bottom-margin", 296),
+            (TAG_INTEGER, "media-left-margin", 0),
+            (TAG_INTEGER, "media-right-margin", 0),
+            (TAG_KEYWORD, "media-type", "stationery"),
+        )
+    )
+    body = build_request(
+        OP_GET_PRINTER_ATTRIBUTES,
+        operation_attributes=[
+            (TAG_CHARSET, "attributes-charset", "utf-8"),
+            (TAG_BEGIN_COLLECTION, "media-col", media_col),
+        ],
+    )
+    parsed = parse_response(body)
+    col = parsed.first("media-col")
+    assert col["media-size"]["x-dimension"] == 21000
+    assert col["media-size"]["y-dimension"] == 29700
+    assert col["media-top-margin"] == 296
+    assert col["media-left-margin"] == 0
+    assert col["media-type"] == "stationery"
