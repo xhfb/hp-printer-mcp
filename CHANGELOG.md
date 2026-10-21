@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 — 打印预览
+
+- 新增默认工具 `hp_preview_print`。参数与 `hp_print_file` 相同，走同一套光栅排版，不发送打印作业。
+- 结果先给 JSON，再按页附上阅读方向图片，方便 agent 检查换行、页边和横版。淡红边和红色虚线标出这台机器约 2.96 mm 的不可印边，本身不会印出。
+- 预览图写到 `{HP_SCAN_OUTPUT_DIR}/preview/`。`max_pages` 默认 6，上限 8。
+
 ## 0.4.0 — 单作业 PWG 与能力校验
 
 - 多页文档合成一个 `image/pwg-raster` Print-Job，双面和多份逐份生效，并只返回一个 `job_id`。

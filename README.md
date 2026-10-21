@@ -1,6 +1,6 @@
 # HP Printer MCP
 
-MCP server for **HP Smart Tank 750** (network-connected). Default tools: print, scan, status, cancel. Extra tools (discover / jobs / supplies / copy) behind `HP_MCP_EXTRA_TOOLS=1`.
+MCP server for **HP Smart Tank 750** (network-connected). Default tools: print, print preview, scan, status, cancel. Extra tools (discover / jobs / supplies / copy) behind `HP_MCP_EXTRA_TOOLS=1`.
 
 工具一律 `hp_*`，与德佟标签机 `detong_*` 分开，不要混用。
 
@@ -83,11 +83,12 @@ Workstation still registers this server in MCP Router. LAN clients (e.g. Raspber
 
 ## MCP tools
 
-默认 4 个（办公喷墨，**不是**德佟标签）：
+默认 5 个（办公喷墨，**不是**德佟标签）：
 
 | Tool | Description |
 |------|-------------|
 | `hp_print_file` | IPP 打 PDF/图/文本；成功返回 `job_id` |
+| `hp_preview_print` | 同一套参数的打印预览，不出纸；返回阅读方向图片 |
 | `hp_scan_to_file` | eSCL 扫描到 PDF/JPEG（不支持 PNG） |
 | `hp_get_status` | 主机 / IPP / 扫描头状态 |
 | `hp_cancel_job` | 按 IPP `job_id` 取消 |
@@ -110,6 +111,8 @@ All tools return JSON: `{ "success": bool, "error": string|null, "data": ... }`.
 | `duplex` | `none`, `long_edge`, `short_edge` | one PWG job, so the back side is actually printed |
 | `copies` | integer ≥ 1, within `copies-supported` | collated by repeating the page sequence inside the one PWG document. IPP `copies` stays 1 so this printer does not drop or double them |
 | `page_range` | `all` or `1-3,5` | PDF only |
+
+`hp_preview_print` takes the same arguments, plus `max_pages` (default 6, cap 8) and `show_margins`. It does not contact the printer. The tool result is JSON followed by one image per previewed page. The pale red band and dashed line mark this machine's 2.96 mm unprintable margin and are not printed. Landscape is shown in reading orientation; the real job still rotates that page into the portrait feed. Files land in `{HP_SCAN_OUTPUT_DIR}/preview/`.
 
 ## Security
 

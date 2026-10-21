@@ -217,6 +217,25 @@ def _render_text_pages(
     monochrome: bool,
     dpi: int = 150,
 ) -> list[Image.Image]:
+    pages, _total = _compose_text_pages(
+        text,
+        paper=paper,
+        orientation=orientation,
+        monochrome=monochrome,
+        dpi=dpi,
+    )
+    return pages
+
+
+def _compose_text_pages(
+    text: str,
+    *,
+    paper: str,
+    orientation: str,
+    monochrome: bool,
+    dpi: int = 150,
+    max_pages: int | None = None,
+) -> tuple[list[Image.Image], int]:
     width, height = _page_size(paper, orientation, dpi)
     margin = max(1, round(72 * dpi / 150))
     # HP_PRINT_FONT_SIZE is the pixel size at 150 dpi (~17 pt).
@@ -235,8 +254,12 @@ def _render_text_pages(
         wrapped.extend(_wrap_line_mixed(probe, line, cjk_font, latin_font, max_width))
 
     lines_per_page = max(1, (height - 2 * margin) // line_height)
+    spans = list(range(0, max(1, len(wrapped)), lines_per_page))
+    total_pages = len(spans)
+    if max_pages is not None:
+        spans = spans[:max_pages]
     pages: list[Image.Image] = []
-    for start in range(0, max(1, len(wrapped)), lines_per_page):
+    for start in spans:
         chunk = wrapped[start : start + lines_per_page]
         img = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(img)
@@ -248,7 +271,7 @@ def _render_text_pages(
             )
             y += line_height
         pages.append(_to_rgb(img, monochrome=monochrome))
-    return pages
+    return pages, total_pages
 
 
 def _render_pdf_pages(
@@ -259,12 +282,16 @@ def _render_pdf_pages(
     monochrome: bool,
     page_range: str,
     dpi: int = 150,
-) -> list[Image.Image]:
+    max_pages: int | None = None,
+) -> tuple[list[Image.Image], int]:
     import fitz
 
     doc = fitz.open(path)
     try:
         indices = parse_page_range(page_range, total_pages=doc.page_count)
+        total_pages = len(indices)
+        if max_pages is not None:
+            indices = indices[:max_pages]
         page_size = _page_size(paper, orientation, dpi)
         pages: list[Image.Image] = []
         for idx in indices:
@@ -274,7 +301,7 @@ def _render_pdf_pages(
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             img = _to_rgb(img, monochrome=monochrome)
             pages.append(_fit_on_page(img, page_size))
-        return pages
+        return pages, total_pages
     finally:
         doc.close()
 
@@ -292,7 +319,7 @@ def _render_image_pages(
         return [_fit_on_page(converted, _page_size(paper, orientation, dpi))]
 
 
-def rasterize_to_images(
+def rasterize_document(
     path: Path,
     *,
     paper: str = "A4",
@@ -300,8 +327,15 @@ def rasterize_to_images(
     color: str = "color",
     page_range: str = "all",
     dpi: int = 150,
-) -> list[Image.Image]:
-    """Render a printable file to one RGB page image per page."""
+    max_pages: int | None = None,
+) -> tuple[list[Image.Image], int]:
+    """Render a printable file.
+
+    Returns ``(pages, total_pages)``. ``pages`` stops at ``max_pages`` when that
+    limit is set; ``total_pages`` is the full count that would be printed.
+    """
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("max_pages must be >= 1")
     suffix = path.suffix.lower()
     monochrome = color.strip().lower() == "monochrome"
 
@@ -313,28 +347,52 @@ def rasterize_to_images(
             monochrome=monochrome,
             page_range=page_range,
             dpi=dpi,
+            max_pages=max_pages,
         )
     if suffix in IMAGE_EXTENSIONS:
-        return _render_image_pages(
+        pages = _render_image_pages(
             path,
             paper=paper,
             orientation=orientation,
             monochrome=monochrome,
             dpi=dpi,
         )
+        return pages, len(pages)
     if suffix in TEXT_EXTENSIONS:
         text = path.read_text(encoding="utf-8", errors="replace")
-        return _render_text_pages(
+        return _compose_text_pages(
             text,
             paper=paper,
             orientation=orientation,
             monochrome=monochrome,
             dpi=dpi,
+            max_pages=max_pages,
         )
     raise ValueError(
         f"Unsupported file type for IPP rasterize: {suffix}. "
         "Convert Office documents to PDF/TXT/image first, or use a host with converters."
     )
+
+
+def rasterize_to_images(
+    path: Path,
+    *,
+    paper: str = "A4",
+    orientation: str = "portrait",
+    color: str = "color",
+    page_range: str = "all",
+    dpi: int = 150,
+) -> list[Image.Image]:
+    """Render a printable file to one RGB page image per page."""
+    pages, _total = rasterize_document(
+        path,
+        paper=paper,
+        orientation=orientation,
+        color=color,
+        page_range=page_range,
+        dpi=dpi,
+    )
+    return pages
 
 
 def rasterize_to_jpegs(

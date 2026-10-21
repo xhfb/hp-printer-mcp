@@ -13,6 +13,7 @@ from hp_printer_mcp.print_ipp import is_printer_ready
 from hp_printer_mcp.print_ipp import list_print_jobs as run_list_print_jobs
 from hp_printer_mcp.print_ipp import print_file as run_print_file
 from hp_printer_mcp.print_ipp import print_queue_count
+from hp_printer_mcp.preview import preview_print as run_preview_print
 from hp_printer_mcp.scan_escl import get_scan_capabilities as run_get_scan_capabilities
 from hp_printer_mcp.scan_escl import get_scanner_status as run_get_scanner_status
 from hp_printer_mcp.scan_escl import scan_to_file as run_scan_to_file
@@ -28,7 +29,8 @@ mcp = FastMCP(
     "hp-printer",
     instructions=(
         _HP_VS_DETONG
-        + " 默认工具：hp_print_file、hp_scan_to_file、hp_get_status、hp_cancel_job。"
+        + " 默认工具：hp_print_file、hp_preview_print、hp_scan_to_file、hp_get_status、hp_cancel_job。"
+        " 排版不确定时先 hp_preview_print（不出纸），再 hp_print_file。"
         " 发现/队列/墨量/复印等需设置 HP_MCP_EXTRA_TOOLS=1。"
     ),
 )
@@ -62,6 +64,7 @@ async def hp_print_file(
     三选一：file_path 或 content_base64+filename 或 url。
     多页会合成一个 image/pwg-raster 作业，因此双面和多份是逐份的，并返回一个 job_id。
     横版内容会转进竖向走纸，因为这台机器只接受 portrait。
+    排版不确定时先用 hp_preview_print（参数相同，不出纸）看阅读方向预览，再调用本工具。
 
     paper: A4、A5、A6、Letter、Legal、4x6、Hagaki、L、2L、DL、C6 等，以打印机为准。
     paper_type: plain、lightweight、photo、matte、brochure 等，映射到 IPP media-type。
@@ -87,6 +90,54 @@ async def hp_print_file(
         borderless=borderless,
         printer_name=printer_name,
     )
+
+
+@mcp.tool(name="hp_preview_print")
+async def hp_preview_print(
+    file_path: Optional[str] = None,
+    content_base64: Optional[str] = None,
+    filename: Optional[str] = None,
+    url: Optional[str] = None,
+    copies: int = 1,
+    orientation: str = "portrait",
+    paper: str = "A4",
+    paper_type: str = "plain",
+    quality: str = "normal",
+    color: str = "color",
+    duplex: str = "none",
+    page_range: str = "all",
+    borderless: bool = False,
+    max_pages: int = 6,
+    show_margins: bool = True,
+    printer_name: Optional[str] = None,
+) -> dict | list:
+    """【HP Smart Tank 750】打印预览，不出纸。不是德佟标签机。
+
+    用和 hp_print_file 相同的光栅排版生成阅读方向图片，给 agent 检查换行、页边和横版。
+    参数与 hp_print_file 一致。确认后再调用 hp_print_file。
+    返回的图片与 data.pages 顺序一致。淡红边和红色虚线是约 2.96 mm 不可印区域，不会印出来。
+    横版按阅读方向显示；出纸时会转进竖向走纸。max_pages 默认 6，最多 8。
+    """
+    settings = load_settings()
+    return run_preview_print(
+        settings,
+        file_path=file_path,
+        content_base64=content_base64,
+        filename=filename,
+        url=url,
+        copies=copies,
+        orientation=orientation,
+        paper=paper,
+        paper_type=paper_type,
+        quality=quality,
+        color=color,
+        duplex=duplex,
+        page_range=page_range,
+        borderless=borderless,
+        max_pages=max_pages,
+        show_margins=show_margins,
+        printer_name=printer_name,
+    ).as_tool_result()
 
 
 @mcp.tool(name="hp_scan_to_file")
