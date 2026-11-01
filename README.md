@@ -1,8 +1,8 @@
 # HP Printer MCP
 
-MCP server for **HP Smart Tank 750** (network-connected). Default tools: print, print preview, scan, status, cancel. Extra tools (discover / jobs / supplies / copy) behind `HP_MCP_EXTRA_TOOLS=1`.
+MCP server for an **HP Smart Tank 750** on the local network. Default tools print, preview, scan, report status, and cancel jobs. Discover, job list, scan capabilities, supplies, and copy stay unregistered until `HP_MCP_EXTRA_TOOLS=1`.
 
-工具一律 `hp_*`，与德佟标签机 `detong_*` 分开，不要混用。
+Every tool name starts with `hp_` and controls this HP printer over IPP and eSCL.
 
 ## Protocols (network-native)
 
@@ -83,7 +83,7 @@ Workstation still registers this server in MCP Router. LAN clients (e.g. Raspber
 
 ## MCP tools
 
-默认 5 个（办公喷墨，**不是**德佟标签）：
+Five tools are registered by default:
 
 | Tool | Description |
 |------|-------------|
